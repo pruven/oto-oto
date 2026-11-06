@@ -900,9 +900,19 @@ fn stream_mixer(s: &State, kit: &Kit, layers: &mut Vec<El>) -> El {
             if s.mixer.active {
                 s.action(Action::Mix(MixAction::Stop));
             } else {
+                let microphone = s
+                    .mix_microphone
+                    .as_ref()
+                    .filter(|name| {
+                        s.audio
+                            .inputs
+                            .iter()
+                            .any(|input| !input.internal && input.name == **name)
+                    })
+                    .cloned();
                 s.action(Action::Mix(MixAction::Start {
                     monitor: output.clone(),
-                    microphone: s.mix_microphone.clone(),
+                    microphone,
                 }));
             }
         });
