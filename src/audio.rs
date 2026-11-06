@@ -33,6 +33,8 @@ pub struct Port {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Item {
+    pub owner_module: Option<u32>,
+    pub internal: bool,
     pub index: u32,
     pub name: String,
     pub title: String,
@@ -92,6 +94,8 @@ struct Channel {
 struct RawItem {
     index: u32,
     #[serde(default)]
+    owner_module: serde_json::Value,
+    #[serde(default)]
     name: String,
     #[serde(default)]
     description: String,
@@ -112,7 +116,12 @@ struct RawItem {
     #[serde(default)]
     ports: Vec<Port>,
     #[serde(default)]
+    #[serde(deserialize_with = "null_string")]
     active_port: String,
+}
+
+fn null_string<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    Option::<String>::deserialize(deserializer).map(Option::unwrap_or_default)
 }
 
 pub fn parse_items(json: &str, kind: Kind) -> Result<Vec<Item>, String> {
@@ -170,6 +179,11 @@ pub fn parse_items(json: &str, kind: Kind) -> Result<Vec<Item>, String> {
                     .unwrap_or_else(|| "Audio device".into())
             };
             Some(Item {
+                owner_module: crate::stream::number(&r.owner_module),
+                internal: prop("application.id") == "io.oto-oto.mixer"
+                    || r.name.starts_with(crate::stream::PREFIX)
+                    || (crate::stream::number(&r.owner_module).is_some()
+                        && prop("media.name") == "Oto Oto Stream input"),
                 index: r.index,
                 name: r.name,
                 title,
@@ -194,7 +208,7 @@ pub fn parse_items(json: &str, kind: Kind) -> Result<Vec<Item>, String> {
 }
 
 // A disconnected audio server must not hang the UI or keep a worker alive forever.
-fn pactl(args: &[String]) -> Result<String, String> {
+pub(crate) fn pactl(args: &[String]) -> Result<String, String> {
     let mut child = Command::new("pactl").args(args).env("LC_ALL", "C")
         .stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()
         .map_err(|e| format!("Cannot run pactl: {e}. Install libpulse (Arch) or pulseaudio-utils (Debian/Ubuntu)."))?;
@@ -274,6 +288,8 @@ pub fn snapshot() -> Result<Snapshot, String> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
+    Mix(crate::stream::MixAction),
+    Shutdown,
     Volume(Kind, u32, u32),
     Mute(Kind, u32, bool),
     Default(Kind, String),
@@ -306,12 +322,13 @@ impl Action {
                 id.to_string(),
                 target.to_string(),
             ],
-            Self::Refresh => vec![],
+            Self::Refresh | Self::Mix(_) | Self::Shutdown => vec![],
         }
     }
 }
 
 pub struct Update {
+    pub mixer: crate::stream::MixState,
     pub revision: u64,
     pub snapshot: Result<Snapshot, String>,
     pub action_error: Option<String>,
@@ -320,32 +337,45 @@ pub struct Update {
 pub struct Backend {
     pub commands: Sender<(u64, Action)>,
     pub updates: Receiver<Update>,
+    pub join: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Backend {
     pub fn start(waker: rune::Waker) -> Self {
         let (commands, requests) = mpsc::channel::<(u64, Action)>();
         let (updates, results) = mpsc::channel();
-        std::thread::spawn(move || {
+        let join = std::thread::spawn(move || {
             let mut pending: Option<(u64, Action)> = None;
             let mut revision = 0;
-            loop {
+            let mut mixer: Option<crate::stream::Client> = None;
+            'worker: loop {
                 let mut error = None;
                 if let Some((rev, action)) = pending.take() {
                     revision = rev;
-                    if action != Action::Refresh {
-                        error = pactl(&action.args()).err();
+                    if action == Action::Shutdown {
+                        break;
                     }
+                    error = apply_action(&action, &mut mixer).err();
                     // Apply queued actions before fetching so older snapshots never undo them.
                     while let Ok((rev, action)) = requests.try_recv() {
                         revision = rev;
-                        if action != Action::Refresh {
-                            error = pactl(&action.args()).err().or(error);
+                        if action == Action::Shutdown {
+                            break 'worker;
                         }
+                        error = apply_action(&action, &mut mixer).err().or(error);
                     }
+                }
+                if let Some(client) = &mut mixer
+                    && client.state.active
+                {
+                    error = client
+                        .request(&crate::stream::MixAction::Inspect)
+                        .err()
+                        .or(error);
                 }
                 if updates
                     .send(Update {
+                        mixer: mixer.as_ref().map(|c| c.state.clone()).unwrap_or_default(),
                         revision,
                         snapshot: snapshot(),
                         action_error: error,
@@ -365,6 +395,32 @@ impl Backend {
         Self {
             commands,
             updates: results,
+            join: Some(join),
+        }
+    }
+}
+
+fn apply_action(action: &Action, mixer: &mut Option<crate::stream::Client>) -> Result<(), String> {
+    match action {
+        Action::Mix(action) => {
+            if mixer.as_mut().is_some_and(|c| !c.running()) {
+                mixer.take();
+            }
+            if mixer.is_none() {
+                *mixer = Some(crate::stream::Client::spawn()?);
+            }
+            mixer.as_mut().unwrap().request(action)
+        }
+        Action::Refresh | Action::Shutdown => Ok(()),
+        _ => pactl(&action.args()).map(|_| ()),
+    }
+}
+
+impl Drop for Backend {
+    fn drop(&mut self) {
+        let _ = self.commands.send((u64::MAX, Action::Shutdown));
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
         }
     }
 }
@@ -408,5 +464,13 @@ mod tests {
     #[test]
     fn malformed_server_response_is_an_error() {
         assert!(parse_items("not json", Kind::Output).is_err());
+    }
+
+    #[test]
+    fn virtual_devices_accept_null_ports_and_string_module_ids() {
+        let items = parse_items(r#"[{"index":5,"name":"oto_oto_mix_music","active_port":null,"owner_module":"536870918"}]"#, Kind::Output).unwrap();
+        assert!(items[0].internal);
+        assert_eq!(items[0].owner_module, Some(536870918));
+        assert_eq!(items[0].active_port, "");
     }
 }

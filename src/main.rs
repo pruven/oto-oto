@@ -1,4 +1,5 @@
 mod audio;
+mod stream;
 mod ui;
 
 use audio::{Action, Backend, Item, Kind, Port, Snapshot};
@@ -9,9 +10,15 @@ enum Tab {
     Output,
     Input,
     Apps,
+    Stream,
 }
 
 struct State {
+    mixer: stream::MixState,
+    mix_busy: bool,
+    mix_drag: bool,
+    mix_output: Option<String>,
+    mix_microphone: Option<String>,
     audio: Snapshot,
     backend: Option<Backend>,
     tab: Tab,
@@ -31,6 +38,11 @@ impl State {
         // Rune's scripted rendering must never change the user's real audio settings.
         let demo = rune::is_headless() || std::env::args().any(|s| s == "--demo");
         let mut state = Self {
+            mixer: stream::MixState::default(),
+            mix_busy: false,
+            mix_drag: false,
+            mix_output: None,
+            mix_microphone: None,
             audio: Snapshot::default(),
             backend: None,
             tab: Tab::Output,
@@ -53,6 +65,44 @@ impl State {
 
     fn action(&mut self, action: Action) {
         match &action {
+            Action::Mix(action) => {
+                self.mixer.preview(action);
+                if matches!(
+                    action,
+                    stream::MixAction::Start { .. } | stream::MixAction::Stop
+                ) {
+                    self.mix_busy = true;
+                }
+                if self.demo {
+                    match action {
+                        stream::MixAction::Start { .. } => {
+                            self.mixer.active = true;
+                            self.mixer.sinks =
+                                [Some(100), Some(101), Some(102), Some(103), Some(104)];
+                        }
+                        stream::MixAction::Stop => {
+                            for item in &mut self.audio.playback {
+                                if self.mixer.sinks.contains(&item.target) {
+                                    item.target = self.audio.outputs.first().map(|i| i.index);
+                                }
+                            }
+                            self.mixer.active = false;
+                            self.mixer.sinks = [None; 5];
+                        }
+                        stream::MixAction::Assign { stream, channel } => {
+                            if let Some(item) =
+                                self.audio.playback.iter_mut().find(|i| i.index == *stream)
+                            {
+                                item.target = channel
+                                    .and_then(|c| self.mixer.sinks[c])
+                                    .or_else(|| self.audio.outputs.first().map(|i| i.index));
+                            }
+                        }
+                        _ => {}
+                    }
+                    self.mix_busy = false;
+                }
+            }
             Action::Volume(k, id, v) => {
                 if let Some(item) = self.item_mut(*k, *id) {
                     item.volume = (*v).min(100);
@@ -132,11 +182,20 @@ fn poll(s: &mut State, clock: f64, tx: &mut Tx) -> bool {
                 s.error = Some(error);
                 changed = true;
             }
-            if update.revision < s.revision || s.drag.is_some() {
+            if update.revision < s.revision || s.drag.is_some() || s.mix_drag {
                 continue;
             }
+            changed |= s.mixer != update.mixer || s.mix_busy;
+            s.mixer = update.mixer;
+            s.mix_busy = false;
             match update.snapshot {
-                Ok(audio) => {
+                Ok(mut audio) => {
+                    audio.outputs.retain(stream::public_item);
+                    audio
+                        .inputs
+                        .retain(|i| !i.internal || i.name == stream::SOURCE);
+                    audio.playback.retain(stream::public_item);
+                    audio.recording.retain(stream::public_item);
                     changed |= s.audio != audio || !s.connected;
                     s.audio = audio;
                     s.connected = true;
@@ -196,6 +255,7 @@ fn on_key(s: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
             "1" => s.switch_tab(Tab::Output),
             "2" => s.switch_tab(Tab::Input),
             "3" => s.switch_tab(Tab::Apps),
+            "4" => s.switch_tab(Tab::Stream),
             "?" => s.help = !s.help,
             "q" => tx.quit(),
             "r" => s.action(Action::Refresh),
@@ -228,6 +288,8 @@ fn on_key(s: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
 
 fn demo_audio() -> Snapshot {
     let device = |index, name: &str, title: &str, port: &str, volume, running| Item {
+        owner_module: None,
+        internal: false,
         index,
         name: name.into(),
         title: title.into(),
@@ -244,6 +306,8 @@ fn demo_audio() -> Snapshot {
         active_port: "analog".into(),
     };
     let stream = |index, title: &str, detail: &str, volume, target| Item {
+        owner_module: None,
+        internal: false,
         index,
         name: String::new(),
         title: title.into(),
@@ -286,9 +350,17 @@ fn demo_audio() -> Snapshot {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|a| a == "--mix-worker") {
+        stream::worker();
+        return;
+    }
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        println!("oto-oto {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!(
-            "Oto Oto — Linux audio control\n\n  oto-oto                 Open the mixer\n  oto-oto --demo          Open with sample devices; no audio changes\n  oto-oto status         Print real audio state as JSON\n  oto-oto --snap FILE     Render sample devices to a PNG\n  oto-oto --scene apps    Select the apps scene for rendering\n\nShortcuts: 1/2/3 tabs · M/Space mute default · +/- volume · R refresh · ? help · Q quit"
+            "Oto Oto — Linux audio control\n\n  oto-oto                 Open the mixer\n  oto-oto --demo          Open with sample devices; no audio changes\n  oto-oto status         Print real audio state as JSON\n  oto-oto --snap FILE     Render sample devices to a PNG\n  oto-oto --scene stream-live --snap FILE    Render the dual stream mixer\n\nStream Mix: choose a listening output and optional mic, start the mixer, assign apps to channels, then select Oto Oto Stream in OBS. Keep Oto Oto open for the session.\n\nShortcuts: 1/2/3/4 tabs · M/Space mute default · +/- volume · R refresh · ? help · Q quit"
         );
         return;
     }
@@ -312,6 +384,21 @@ fn main() {
             ("output", |s| s.tab = Tab::Output),
             ("input", |s| s.tab = Tab::Input),
             ("apps", |s| s.tab = Tab::Apps),
+            ("stream", |s| {
+                s.tab = Tab::Stream;
+                s.mixer.monitor = "speakers".into();
+            }),
+            ("stream-live", |s| {
+                s.tab = Tab::Stream;
+                s.action(Action::Mix(stream::MixAction::Start {
+                    monitor: "speakers".into(),
+                    microphone: Some("mic".into()),
+                }));
+                s.action(Action::Mix(stream::MixAction::Assign {
+                    stream: 10,
+                    channel: Some(0),
+                }));
+            }),
             ("empty", |s| s.audio = Snapshot::default()),
             ("error", |s| {
                 s.connected = false;
@@ -328,11 +415,15 @@ mod tests {
     use rune::{Env, Mods, Runtime};
 
     fn runtime() -> Runtime<State> {
+        runtime_at((940.0, 740.0))
+    }
+
+    fn runtime_at(size: (f32, f32)) -> Runtime<State> {
         let mut s = State::new();
         s.demo = true;
         s.audio = demo_audio();
         s.connected = true;
-        let mut rt = Runtime::new(s, ui::view, (940.0, 740.0), Env::new(true, 1.0));
+        let mut rt = Runtime::new(s, ui::view, size, Env::new(true, 1.0));
         rt.on_key = Some(on_key);
         rt.frame(0.0);
         rt
@@ -455,6 +546,7 @@ mod tests {
         rt.state.backend = Some(Backend {
             commands,
             updates: results,
+            join: None,
         });
         rt.state.action(Action::Volume(Kind::Output, 1, 20));
         assert_eq!(
@@ -463,6 +555,7 @@ mod tests {
         );
         updates
             .send(audio::Update {
+                mixer: stream::MixState::default(),
                 revision: 0,
                 snapshot: Ok(demo_audio()),
                 action_error: None,
@@ -475,6 +568,7 @@ mod tests {
         fresh.outputs[0].volume = 21;
         updates
             .send(audio::Update {
+                mixer: stream::MixState::default(),
                 revision: 1,
                 snapshot: Ok(fresh),
                 action_error: None,
@@ -482,5 +576,52 @@ mod tests {
             .unwrap();
         poll(&mut rt.state, 0.0, &mut tx);
         assert_eq!(rt.state.audio.outputs[0].volume, 21);
+    }
+
+    #[test]
+    fn stream_ui_starts_assigns_apps_and_stops_without_touching_the_other_mix() {
+        let mut rt = runtime_at((940.0, 1400.0));
+        click(&mut rt, "tab-Stream");
+        click(&mut rt, "mix-toggle");
+        assert!(rt.state.mixer.active);
+        click(&mut rt, "mix-0-Stream-mute");
+        assert!(rt.state.mixer.levels[0][1].muted);
+        assert!(!rt.state.mixer.levels[0][0].muted);
+        click(&mut rt, "mix-assign-10-trigger");
+        click(&mut rt, "option1");
+        assert_eq!(rt.state.audio.playback[0].target, Some(100));
+        click(&mut rt, "mix-toggle");
+        assert!(!rt.state.mixer.active);
+        assert_eq!(rt.state.audio.playback[0].target, Some(1));
+    }
+
+    #[test]
+    fn mix_slider_cancel_and_keyboard_steps_only_change_the_selected_bus() {
+        let mut rt = runtime_at((940.0, 1400.0));
+        click(&mut rt, "tab-Stream");
+        let slider = rt
+            .elements()
+            .into_iter()
+            .find(|i| i.key.as_deref() == Some("mix-0-Listen"))
+            .unwrap();
+        let [x, y, w, h] = slider.rect;
+        rt.pointer_down(x + w * 0.7, y + h / 2.0);
+        rt.pointer_move(x + w * 0.2, y + h / 2.0);
+        rt.frame(0.0);
+        assert!(rt.state.mixer.levels[0][0].volume < 30);
+        rt.key(KeyEvent {
+            key: Key::Escape,
+            mods: Mods::default(),
+        });
+        rt.pointer_up(x + w * 0.2, y + h / 2.0);
+        settle(&mut rt);
+        assert_eq!(rt.state.mixer.levels[0][0].volume, 70);
+        rt.key(KeyEvent {
+            key: Key::Left,
+            mods: Mods::default(),
+        });
+        rt.frame(0.0);
+        assert_eq!(rt.state.mixer.levels[0][0].volume, 69);
+        assert_eq!(rt.state.mixer.levels[0][1].volume, 70);
     }
 }

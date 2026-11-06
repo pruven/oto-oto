@@ -3,4 +3,5 @@
 /packaging/src/
 /packaging/pkg/
 /packaging/*.pkg.tar.*
+__pycache__/
 

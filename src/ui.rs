@@ -1,4 +1,5 @@
 use crate::audio::{Action, Item, Kind};
+use crate::stream::{Bus, CHANNELS, MixAction};
 use crate::{State, Tab};
 use rune::{
     Align, Color, Cx, Drag, El, Phase, ScrollSpec, Shape, TextStyle, canvas, col, el, row, text,
@@ -170,6 +171,7 @@ pub fn view(s: &State, _: &mut Cx<State>) -> El {
             Glyph::Apps,
             s.audio.playback.len() + s.audio.recording.len(),
         ),
+        (Tab::Stream, "Stream Mix", Glyph::Apps, 5),
     ] {
         let active = s.tab == tab;
         nav = nav.child(
@@ -208,6 +210,10 @@ pub fn view(s: &State, _: &mut Cx<State>) -> El {
         Tab::Apps => (
             "Every app. Its own space.",
             "Mix playback and choose where each app sends its sound.",
+        ),
+        Tab::Stream => (
+            "Your mix. Their mix.",
+            "Balance what you hear separately from what your audience hears.",
         ),
     };
     let mut content = col().key("content").w_full().gap(12.0).child(
@@ -315,6 +321,9 @@ pub fn view(s: &State, _: &mut Cx<State>) -> El {
                 }
             }
         }
+        Tab::Stream => {
+            content = content.child(stream_mixer(s, &kit, &mut layers));
+        }
     }
     let footer = row()
         .w_full()
@@ -345,7 +354,7 @@ pub fn view(s: &State, _: &mut Cx<State>) -> El {
             MUTED,
         ))
         .child(el().grow(1.0))
-        .child(label("1–3 switch tabs", 10.0, 400.0, FAINT))
+        .child(label("1–4 switch tabs", 10.0, 400.0, FAINT))
         .child(
             button("?  Shortcuts")
                 .key("help-button")
@@ -399,7 +408,7 @@ pub fn view(s: &State, _: &mut Cx<State>) -> El {
         layers.push(el().key("help-overlay").absolute(0.0, 0.0).w_full().h_full().fill(BG.alpha(0.9)).center()
             .child(col().w(460.0).padding(28.0).gap(16.0).fill(PANEL).border(1.0, BORDER)
                 .child(label("At your fingertips", 22.0, 500.0, INK))
-                .child(label("1 / 2 / 3     Output / Input / Applications\nM or Space    Mute the default device\n+ / −         Change default volume by 5%\nR             Refresh devices\nTab           Move between controls\nArrow keys    Adjust a focused slider\n? / Escape    Close this panel\nQ             Quit", 13.0, 400.0, MUTED))
+                .child(label("1 / 2 / 3 / 4  Output / Input / Applications / Stream Mix\nM or Space    Mute the default device\n+ / −         Change default volume by 5%\nR             Refresh devices\nTab           Move between controls\nArrow keys    Adjust a focused slider\n? / Escape    Close this panel\nQ             Quit", 13.0, 400.0, MUTED))
                 .child(button("Close").key("close-help").on_press(|s: &mut State| s.help = false)))
             .modal(true, |s: &mut State| s.help = false));
     }
@@ -784,4 +793,394 @@ fn volume_control(s: &State, kind: Kind, item: &Item) -> El {
             400.0,
             FAINT,
         ))
+}
+
+fn stream_mixer(s: &State, kit: &Kit, layers: &mut Vec<El>) -> El {
+    let outputs: Vec<_> = s.audio.outputs.iter().filter(|i| !i.internal).collect();
+    let microphones: Vec<_> = s.audio.inputs.iter().filter(|i| !i.internal).collect();
+    let output_labels = choice_labels(outputs.iter().map(|d| d.title.clone()));
+    let output_names: Vec<_> = outputs.iter().map(|d| d.name.clone()).collect();
+    let output = if s.mixer.active {
+        Some(s.mixer.monitor.as_str())
+    } else {
+        s.mix_output
+            .as_deref()
+            .or(Some(s.audio.default_output.as_str()))
+    };
+    let selected_output = outputs
+        .iter()
+        .position(|d| Some(d.name.as_str()) == output)
+        .unwrap_or(0);
+    let output_current = output_labels.get(selected_output).map(String::as_str);
+    let mut mic_labels = vec!["No microphone".to_string()];
+    mic_labels.extend(choice_labels(microphones.iter().map(|d| d.title.clone())));
+    let mic_names: Vec<_> = std::iter::once(None)
+        .chain(microphones.iter().map(|d| Some(d.name.clone())))
+        .collect();
+    let mic = if s.mixer.active {
+        s.mixer.microphone.as_deref()
+    } else {
+        s.mix_microphone.as_deref()
+    };
+    let mic_current = mic_names
+        .iter()
+        .position(|name| name.as_deref() == mic)
+        .unwrap_or(0);
+    let out_labels = output_labels.clone();
+    let mic_options = mic_labels.clone();
+    let disabled = s.mixer.active || s.mix_busy;
+    let setup = row()
+        .w_full()
+        .gap(18.0)
+        .center_y()
+        .child(
+            col()
+                .grow(1.0)
+                .min_w(0.0)
+                .gap(7.0)
+                .child(label("LISTEN ON", 9.0, 600.0, FAINT))
+                .child(
+                    Select::new("mix-output", &output_labels)
+                        .current(output_current)
+                        .label("Listening device")
+                        .placeholder("Choose an output")
+                        .disabled(disabled || outputs.is_empty())
+                        .open(s.menu.as_deref() == Some("mix-output"))
+                        .on_toggle(|s: &mut State| s.menu = Some("mix-output".into()))
+                        .on_close(|s: &mut State| s.menu = None)
+                        .on_choose(move |s: &mut State, value, _| {
+                            if let Some(i) = out_labels.iter().position(|v| v == value) {
+                                s.mix_output = Some(output_names[i].clone());
+                            }
+                            s.menu = None;
+                        })
+                        .build(kit, layers),
+                ),
+        )
+        .child(
+            col()
+                .grow(1.0)
+                .min_w(0.0)
+                .gap(7.0)
+                .child(label("MICROPHONE", 9.0, 600.0, FAINT))
+                .child(
+                    Select::new("mix-mic", &mic_labels)
+                        .current(Some(&mic_labels[mic_current]))
+                        .label("Stream microphone")
+                        .disabled(disabled)
+                        .open(s.menu.as_deref() == Some("mix-mic"))
+                        .on_toggle(|s: &mut State| s.menu = Some("mix-mic".into()))
+                        .on_close(|s: &mut State| s.menu = None)
+                        .on_choose(move |s: &mut State, value, _| {
+                            if let Some(i) = mic_options.iter().position(|v| v == value) {
+                                s.mix_microphone = mic_names[i].clone();
+                            }
+                            s.menu = None;
+                        })
+                        .build(kit, layers),
+                ),
+        );
+    let mut toggle = button(if s.mix_busy {
+        "Please wait…"
+    } else if s.mixer.active {
+        "Stop mixer"
+    } else {
+        "Start mixer"
+    })
+    .key("mix-toggle")
+    .h(34.0);
+    if s.mix_busy || outputs.is_empty() {
+        toggle = toggle.disabled(true).opacity(0.4);
+    } else {
+        let output = outputs
+            .get(selected_output)
+            .map(|d| d.name.clone())
+            .unwrap_or_default();
+        toggle = toggle.on_press(move |s: &mut State| {
+            if s.mixer.active {
+                s.action(Action::Mix(MixAction::Stop));
+            } else {
+                s.action(Action::Mix(MixAction::Start {
+                    monitor: output.clone(),
+                    microphone: s.mix_microphone.clone(),
+                }));
+            }
+        });
+    }
+    let mut body = col().w_full().gap(12.0)
+        .child(col().w_full().padding(16.0).gap(14.0).fill(PANEL).border(1.0, BORDER).child(setup)
+            .child(row().w_full().center_y().gap(10.0).child(toggle)
+                .child(label(if s.mixer.active { "Mixer running · stop to change devices" } else { "Select your headphones and, optionally, a microphone." }, 10.0, 400.0, MUTED))))
+        .child(col().w_full().px(14.0).py(12.0).gap(6.0).border(1.0, s.accent.alpha(0.3))
+            .child(label("OBS INPUT  →  Oto Oto Stream", 12.0, 500.0, s.accent))
+            .child(label("Add Audio Input Capture in OBS. Disable duplicate Desktop Audio capture. Keep Oto Oto open while streaming.", 11.0, 400.0, MUTED)))
+        .child(row().w_full().gap(14.0).px(14.0).pt(10.0)
+            .child(label("CHANNEL", 9.0, 600.0, FAINT).w(110.0))
+            .child(label("LISTEN · YOUR HEADPHONES", 9.0, 600.0, MUTED).grow(1.0))
+            .child(label("STREAM · YOUR AUDIENCE", 9.0, 600.0, s.accent).grow(1.0)));
+    for (i, name) in CHANNELS.iter().enumerate() {
+        let count = s
+            .audio
+            .playback
+            .iter()
+            .filter(|item| item.target.is_some() && item.target == s.mixer.sinks[i])
+            .count();
+        let detail = if i == 4 {
+            if mic.is_some() {
+                "Mic input".to_owned()
+            } else {
+                "No mic selected".into()
+            }
+        } else {
+            format!("{count} apps")
+        };
+        body = body.child(
+            row()
+                .key(format!("mix-channel-{i}"))
+                .w_full()
+                .padding(14.0)
+                .gap(14.0)
+                .center_y()
+                .fill(PANEL)
+                .border(1.0, BORDER)
+                .child(
+                    col()
+                        .w(110.0)
+                        .gap(5.0)
+                        .child(label(*name, 13.0, 500.0, INK))
+                        .child(label(detail, 10.0, 400.0, FAINT)),
+                )
+                .child(mix_fader(s, Some(i), Bus::Listen).grow(1.0))
+                .child(mix_fader(s, Some(i), Bus::Stream).grow(1.0)),
+        );
+    }
+    body = body
+        .child(
+            row()
+                .key("mix-masters")
+                .w_full()
+                .padding(14.0)
+                .gap(14.0)
+                .center_y()
+                .border(1.0, s.accent.alpha(0.4))
+                .child(
+                    col()
+                        .w(110.0)
+                        .gap(5.0)
+                        .child(label("Master", 13.0, 600.0, INK))
+                        .child(label("Final mix levels", 10.0, 400.0, FAINT)),
+                )
+                .child(mix_fader(s, None, Bus::Listen).grow(1.0))
+                .child(mix_fader(s, None, Bus::Stream).grow(1.0)),
+        )
+        .child(
+            section_title(
+                "APP CHANNELS",
+                if s.mixer.active {
+                    "Choose a channel for each app"
+                } else {
+                    "Start the mixer to assign apps"
+                },
+            )
+            .pt(12.0),
+        );
+    if s.audio.playback.is_empty() {
+        body = body.child(empty(
+            "No apps playing",
+            "Start audio in a game, music player, browser, or voice app.",
+        ));
+    }
+    let options = ["Not mixed", "Music", "Game", "Voice", "Browser"];
+    for item in &s.audio.playback {
+        let id = item.index;
+        let current = item
+            .target
+            .and_then(|target| {
+                s.mixer.sinks[..4]
+                    .iter()
+                    .position(|sink| *sink == Some(target))
+            })
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let key = format!("mix-assign-{id}");
+        let open = key.clone();
+        body = body.child(
+            row()
+                .w_full()
+                .px(14.0)
+                .py(10.0)
+                .gap(12.0)
+                .center_y()
+                .fill(PANEL)
+                .child(
+                    col()
+                        .grow(1.0)
+                        .min_w(0.0)
+                        .gap(3.0)
+                        .child(label(&item.title, 12.0, 500.0, INK))
+                        .child(label(&item.detail, 10.0, 400.0, FAINT)),
+                )
+                .child(
+                    Select::new(&key, &options)
+                        .label(format!("{} mix channel", item.title))
+                        .current(Some(options[current]))
+                        .disabled(!s.mixer.active || s.mix_busy)
+                        .open(s.menu.as_ref() == Some(&key))
+                        .on_toggle(move |s: &mut State| s.menu = Some(open.clone()))
+                        .on_close(|s: &mut State| s.menu = None)
+                        .on_choose(move |s: &mut State, value, _| {
+                            if let Some(i) = options.iter().position(|v| *v == value) {
+                                s.action(Action::Mix(MixAction::Assign {
+                                    stream: id,
+                                    channel: i.checked_sub(1),
+                                }));
+                            }
+                            s.menu = None;
+                        })
+                        .build(kit, layers),
+                ),
+        );
+    }
+    body.child(label("Apps can also play directly to Oto Oto Music, Game, Voice, or Browser. Stopping restores routed apps and removes mix devices.", 10.0, 400.0, FAINT).pt(4.0))
+}
+
+fn mix_fader(s: &State, channel: Option<usize>, bus: Bus) -> El {
+    let key = format!(
+        "mix-{}-{}",
+        channel
+            .map(|i| i.to_string())
+            .unwrap_or_else(|| "master".into()),
+        bus.name()
+    );
+    let current = s.mixer.level(channel, bus);
+    let color = if current.muted {
+        FAINT
+    } else if bus == Bus::Stream {
+        s.accent
+    } else {
+        INK
+    };
+    let width = 120.0;
+    let knob = 10.0;
+    let travel = width - knob;
+    let name = format!(
+        "{} {}",
+        channel.map(|i| CHANNELS[i]).unwrap_or("Master"),
+        bus.name()
+    );
+    let mut fader = row()
+        .gap(6.0)
+        .center_y()
+        .child(
+            el().key(&key)
+                .role("slider")
+                .label(&name)
+                .focusable(true)
+                .range_value(current.volume as f64, 0.0, 100.0)
+                .range_step(1.0)
+                .size(width, 28.0)
+                .on_step(move |s: &mut State, steps, _| {
+                    let mut level = s.mixer.level(channel, bus);
+                    level.volume = (level.volume as i32 + steps).clamp(0, 100) as u32;
+                    s.action(Action::Mix(MixAction::Level {
+                        channel,
+                        bus,
+                        level,
+                    }));
+                })
+                .on_step_limit(move |s: &mut State, end, _| {
+                    let mut level = s.mixer.level(channel, bus);
+                    level.volume = if end { 100 } else { 0 };
+                    s.action(Action::Mix(MixAction::Level {
+                        channel,
+                        bus,
+                        level,
+                    }));
+                })
+                .on_drag(move |s: &mut State, d: &mut Drag, tx| {
+                    if d.phase == Phase::Down {
+                        d.data = s.mixer.level(channel, bus).volume as f32;
+                        s.mix_drag = true;
+                    }
+                    let mut level = s.mixer.level(channel, bus);
+                    level.volume = if d.cancelled() {
+                        d.data as u32
+                    } else {
+                        (((d.x - knob / 2.0) / travel).clamp(0.0, 1.0) * 100.0).round() as u32
+                    };
+                    let action = MixAction::Level {
+                        channel,
+                        bus,
+                        level,
+                    };
+                    if d.phase == Phase::Up {
+                        s.mix_drag = false;
+                        if d.cancelled() {
+                            s.mixer.preview(&action);
+                        } else {
+                            s.action(Action::Mix(action));
+                        }
+                    } else {
+                        s.mixer.preview(&action);
+                        tx.instant();
+                    }
+                })
+                .child(
+                    el().size(width, 3.0)
+                        .absolute(0.0, 12.5)
+                        .fill(BORDER)
+                        .a11y_hidden(),
+                )
+                .child(
+                    el().size(knob / 2.0 + current.volume as f32 / 100.0 * travel, 3.0)
+                        .absolute(0.0, 12.5)
+                        .fill(color)
+                        .a11y_hidden(),
+                )
+                .child(
+                    el().size(knob, knob)
+                        .radius(knob / 2.0)
+                        .absolute(current.volume as f32 / 100.0 * travel, 9.0)
+                        .fill(color)
+                        .a11y_hidden(),
+                ),
+        )
+        .child(
+            label(format!("{}%", current.volume), 11.0, 500.0, color)
+                .w(34.0)
+                .align(Align::End),
+        )
+        .child(
+            row()
+                .key(format!("{key}-mute"))
+                .role("button")
+                .label(format!("Mute {name}"))
+                .checked(current.muted)
+                .focusable(true)
+                .size(24.0, 28.0)
+                .center()
+                .hover(INK.alpha(0.06))
+                .child(glyph(
+                    if current.muted {
+                        Glyph::Muted
+                    } else {
+                        Glyph::Output
+                    },
+                    color,
+                    15.0,
+                ))
+                .on_press(move |s: &mut State| {
+                    let mut level = s.mixer.level(channel, bus);
+                    level.muted = !level.muted;
+                    s.action(Action::Mix(MixAction::Level {
+                        channel,
+                        bus,
+                        level,
+                    }));
+                }),
+        );
+    if s.mix_busy {
+        fader = fader.inert().opacity(0.4);
+    }
+    fader
 }
