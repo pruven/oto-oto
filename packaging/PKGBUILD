@@ -1,6 +1,6 @@
 # Build a local Arch package from the project root: bin/package
 pkgname=oto-oto
-pkgver=0.1.0
+pkgver=0.2.0
 pkgrel=1
 pkgdesc='Native Linux audio control built with Rust and Rune'
 arch=('x86_64' 'aarch64')
