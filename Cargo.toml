@@ -1,0 +1,20 @@
+[package]
+name = "oto-oto"
+version = "0.1.0"
+edition = "2024"
+description = "A small, native Linux audio mixer built with Rust and Rune"
+license = "MIT"
+
+[dependencies]
+rune = { git = "https://github.com/anomalyco/rune", rev = "7ead7d63fcf6f9dd9669385a8b90e2ae80015d7b", default-features = false, features = ["accessibility"] }
+rune-kit = { git = "https://github.com/anomalyco/rune", rev = "7ead7d63fcf6f9dd9669385a8b90e2ae80015d7b" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.dev]
+debug = 0
+
+[profile.release]
+lto = "thin"
+strip = true
+

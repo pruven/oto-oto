@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Oto Oto
+GenericName=Audio Control
+Comment=Control devices, app volumes, and audio routing
+Exec=oto-oto
+Icon=oto-oto
+Terminal=false
+Categories=AudioVideo;Audio;Mixer;
+Keywords=audio;sound;volume;microphone;PipeWire;PulseAudio;
+StartupWMClass=oto-oto
+

@@ -1,0 +1,29 @@
+# Build a local Arch package from the project root: bin/package
+pkgname=oto-oto
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Native Linux audio control built with Rust and Rune'
+arch=('x86_64' 'aarch64')
+license=('MIT')
+depends=('libpulse' 'libxkbcommon' 'libxkbcommon-x11' 'wayland' 'vulkan-icd-loader')
+makedepends=('cargo' 'git' 'pkgconf')
+options=('!lto')
+
+build() {
+  cd "$startdir/.."
+  cargo build --release --locked
+}
+
+check() {
+  cd "$startdir/.."
+  cargo test --locked
+}
+
+package() {
+  cd "$startdir/.."
+  install -Dm755 target/release/oto-oto "$pkgdir/usr/bin/oto-oto"
+  install -Dm644 packaging/oto-oto.desktop "$pkgdir/usr/share/applications/oto-oto.desktop"
+  install -Dm644 packaging/oto-oto.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/oto-oto.svg"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/oto-oto/LICENSE"
+}
+

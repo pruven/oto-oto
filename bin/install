@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+prefix="${PREFIX:-$HOME/.local}"
+bin/build
+install -Dm755 target/release/oto-oto "$prefix/bin/oto-oto"
+install -Dm644 packaging/oto-oto.svg "$prefix/share/icons/hicolor/scalable/apps/oto-oto.svg"
+install -d "$prefix/share/applications"
+python3 - "$prefix" <<'PY'
+import pathlib
+import sys
+
+prefix = pathlib.Path(sys.argv[1]).resolve()
+binary = str(prefix / 'bin/oto-oto')
+# Desktop entry Exec has its own quoting and field-code escaping rules.
+escaped = binary.replace('\\', '\\\\').replace('"', '\\"').replace('`', '\\`').replace('$', '\\$').replace('%', '%%')
+entry = pathlib.Path('packaging/oto-oto.desktop').read_text()
+entry = entry.replace('Exec=oto-oto', f'Exec="{escaped}"')
+(prefix / 'share/applications/oto-oto.desktop').write_text(entry)
+PY
+if command -v update-desktop-database >/dev/null; then
+  update-desktop-database "$prefix/share/applications"
+fi
+printf 'Installed Oto Oto to %s/bin/oto-oto\n' "$prefix"
+
