@@ -579,6 +579,33 @@ mod tests {
     }
 
     #[test]
+    fn stream_start_uses_only_an_available_microphone() {
+        for (available, internal) in [(true, false), (false, false), (true, true)] {
+            let mut rt = runtime_at((940.0, 1400.0));
+            rt.state.mix_microphone = Some("mic".into());
+            if available {
+                rt.state.audio.inputs[0].internal = internal;
+            } else {
+                rt.state.audio.inputs.retain(|i| i.name != "mic");
+            }
+            rt.invalidate();
+            settle(&mut rt);
+            click(&mut rt, "tab-Stream");
+            click(&mut rt, "mix-toggle");
+            assert!(rt.state.mixer.active);
+            assert_eq!(
+                rt.state.mixer.microphone.as_deref(),
+                if available && !internal {
+                    Some("mic")
+                } else {
+                    None
+                },
+                "available={available}, internal={internal}"
+            );
+        }
+    }
+
+    #[test]
     fn stream_ui_starts_assigns_apps_and_stops_without_touching_the_other_mix() {
         let mut rt = runtime_at((940.0, 1400.0));
         click(&mut rt, "tab-Stream");
