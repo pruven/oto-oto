@@ -419,15 +419,47 @@ fn apply_action(action: &Action, mixer: &mut Option<crate::stream::Client>) -> R
 impl Drop for Backend {
     fn drop(&mut self) {
         let _ = self.commands.send((u64::MAX, Action::Shutdown));
-        if let Some(join) = self.join.take() {
-            let _ = join.join();
-        }
+        // Detach rather than holding up the UI while audio commands or helper cleanup finish.
+        // The worker still owns the helper; process exit also closes its pipe for EOF cleanup.
+        drop(self.join.take());
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dropping_backend_does_not_wait_for_a_busy_worker() {
+        let (commands, requests) = mpsc::channel();
+        let (_updates, results) = mpsc::channel();
+        let (release, blocked) = mpsc::channel();
+        let (finished, cleanup) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            blocked.recv().unwrap();
+            let shutdown = requests.recv().unwrap();
+            finished.send(shutdown).unwrap();
+        });
+        let backend = Backend {
+            commands,
+            updates: results,
+            join: Some(worker),
+        };
+        let (returned, dropped) = mpsc::channel();
+        let caller = std::thread::spawn(move || {
+            drop(backend);
+            returned.send(()).unwrap();
+        });
+        let promptly = dropped.recv_timeout(Duration::from_secs(1)).is_ok();
+        // Release the worker even on failure so the regression cannot hang the test process.
+        release.send(()).unwrap();
+        caller.join().unwrap();
+        assert_eq!(
+            cleanup.recv_timeout(Duration::from_secs(1)).unwrap(),
+            (u64::MAX, Action::Shutdown)
+        );
+        assert!(promptly, "Backend::drop waited for the blocked worker");
+    }
 
     #[test]
     fn volume_uses_raw_values_and_monitor_sources_are_hidden() {
