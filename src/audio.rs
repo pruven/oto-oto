@@ -368,10 +368,7 @@ impl Backend {
                 if let Some(client) = &mut mixer
                     && client.state.active
                 {
-                    error = client
-                        .request(&crate::stream::MixAction::Inspect)
-                        .err()
-                        .or(error);
+                    error = client.inspect().err().or(error);
                 }
                 if updates
                     .send(Update {
