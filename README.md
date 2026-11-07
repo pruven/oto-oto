@@ -22,6 +22,35 @@ Keep Oto Oto open for the streaming session. **Stop mixer**, quitting, or losing
 
 The graph uses PulseAudio-compatible null-sink, loopback, and remap-source modules. It was verified on PipeWire's PulseAudio server; standalone PulseAudio uses the same module interface but has not been tested here. A pipe-owned helper cleans up after UI crashes; session tokens prevent cleanup from unloading unrelated modules after an audio-server restart. Only one mixer session may run per user. Disconnecting a selected device or losing a mix connection stops the session and reports an error. Effects, VST hosting, signal meters, and linked faders are outside this version's scope.
 
+## Download and install
+
+Download `oto-oto-linux-x86_64.tar.gz` and its `.sha256` file from
+[GitHub Releases](https://github.com/pruven/oto-oto/releases). These builds are for
+x86-64 Linux with glibc 2.35 or newer (Ubuntu 22.04 or newer, or a current Arch
+installation). Other architectures can build from source.
+
+Install the runtime dependencies, including a Vulkan driver and `pactl`:
+
+```sh
+# Arch / Omarchy
+sudo pacman -S --needed wayland libxkbcommon libxkbcommon-x11 libpulse vulkan-icd-loader
+# Debian / Ubuntu
+sudo apt install libwayland-client0 libxkbcommon0 libxkbcommon-x11-0 mesa-vulkan-drivers pulseaudio-utils
+```
+
+With a working PipeWire or PulseAudio session, verify and extract the downloaded
+archive from your download directory:
+
+```sh
+sha256sum -c oto-oto-linux-x86_64.tar.gz.sha256
+mkdir -p ~/.local
+tar -xzf oto-oto-linux-x86_64.tar.gz --strip-components=1 -C ~/.local
+~/.local/bin/oto-oto
+```
+
+The archive also installs the desktop launcher and icon. The launcher expects
+`~/.local/bin` on your `PATH`; log out and back in if your desktop does not find it.
+
 ## Build and run
 
 Install a current stable Rust toolchain, the Wayland and XKB libraries, a Vulkan driver, and `pactl`:
@@ -31,7 +60,7 @@ Install a current stable Rust toolchain, the Wayland and XKB libraries, a Vulkan
 sudo pacman -S --needed rust git pkgconf wayland libxkbcommon libxkbcommon-x11 libpulse
 
 # Debian / Ubuntu (with an existing working audio server)
-sudo apt install build-essential git pkg-config libwayland-dev libxkbcommon-dev libxkbcommon-x11-0 mesa-vulkan-drivers pulseaudio-utils
+sudo apt install build-essential git pkg-config libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev mesa-vulkan-drivers pulseaudio-utils
 
 bin/build
 ./target/release/oto-oto
@@ -48,6 +77,25 @@ bin/install
 Open **Oto Oto** from the desktop launcher, or run `~/.local/bin/oto-oto`. `PREFIX` overrides the default `~/.local` install location. For an Arch package, run `bin/package` from the project root, then install the resulting package with `pacman -U`.
 
 On Omarchy the accent follows the current theme within two seconds, including theme symlink replacements. On other desktops it defaults to yellow. No desktop settings are changed.
+
+## CI and releases
+
+GitHub Actions runs `bin/test` (formatting, unit tests, and Clippy) on branch pushes
+and pull requests. Pushing any tag matching `v*` runs the same checks, then builds
+and publishes a GitHub Release with a Linux x86-64 archive and SHA-256 checksum.
+Release builds use Ubuntu 22.04 and the locked Cargo dependencies. The workflow
+uses GitHub's built-in token; no additional release secret is needed.
+
+Update the versions in `Cargo.toml`, `Cargo.lock`, and `packaging/PKGBUILD` as
+appropriate, commit the changes, then push a release tag, for example:
+
+```sh
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+To build the same archive locally, run `bin/dist`; output is written to `dist/`.
+Re-running the publish workflow replaces the assets for the existing release.
 
 ## Controls
 

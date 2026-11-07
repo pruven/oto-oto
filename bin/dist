@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+bin/build
+
+archive="oto-oto-linux-$(uname -m)"
+mkdir -p dist
+stage="$(mktemp -d)"
+trap 'rm -rf "$stage"' EXIT
+
+install -Dm755 target/release/oto-oto "$stage/$archive/bin/oto-oto"
+install -Dm644 packaging/oto-oto.desktop "$stage/$archive/share/applications/oto-oto.desktop"
+install -Dm644 packaging/oto-oto.svg "$stage/$archive/share/icons/hicolor/scalable/apps/oto-oto.svg"
+install -Dm644 LICENSE "$stage/$archive/share/licenses/oto-oto/LICENSE"
+install -Dm644 README.md "$stage/$archive/share/doc/oto-oto/README.md"
+tar -czf "dist/$archive.tar.gz" -C "$stage" "$archive"
+(
+  cd dist
+  sha256sum "$archive.tar.gz" > "$archive.tar.gz.sha256"
+)
+printf 'Packaged dist/%s.tar.gz\n' "$archive"
