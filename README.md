@@ -38,6 +38,13 @@ sudo pacman -S --needed wayland libxkbcommon libxkbcommon-x11 libpulse vulkan-ic
 sudo apt install libwayland-client0 libxkbcommon0 libxkbcommon-x11-0 mesa-vulkan-drivers pulseaudio-utils
 ```
 
+On Arch / Omarchy, also install a [Vulkan driver](https://wiki.archlinux.org/title/Vulkan)
+if one is not already installed: `vulkan-intel` for Intel GPUs, `vulkan-radeon`
+for AMD GPUs, or `nvidia-utils` for an existing proprietary NVIDIA driver setup.
+For CPU software rendering, use `vulkan-swrast`. Install the appropriate package
+with `sudo pacman -S --needed <package>`; `vulkan-icd-loader` alone does not provide
+a renderer. This driver requirement also applies when building from source.
+
 With a working PipeWire or PulseAudio session, verify and extract the downloaded
 archive from your download directory:
 
