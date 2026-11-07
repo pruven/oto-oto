@@ -19,6 +19,7 @@ struct State {
     mix_drag: bool,
     mix_output: Option<String>,
     mix_microphone: Option<String>,
+    demo_routes: std::collections::BTreeMap<u32, u32>,
     audio: Snapshot,
     backend: Option<Backend>,
     tab: Tab,
@@ -43,6 +44,7 @@ impl State {
             mix_drag: false,
             mix_output: None,
             mix_microphone: None,
+            demo_routes: std::collections::BTreeMap::new(),
             audio: Snapshot::default(),
             backend: None,
             tab: Tab::Output,
@@ -81,21 +83,27 @@ impl State {
                                 [Some(100), Some(101), Some(102), Some(103), Some(104)];
                         }
                         stream::MixAction::Stop => {
-                            for item in &mut self.audio.playback {
-                                if self.mixer.sinks.contains(&item.target) {
-                                    item.target = self.audio.outputs.first().map(|i| i.index);
-                                }
+                            let streams: Vec<_> =
+                                self.audio.playback.iter().map(|i| i.index).collect();
+                            for stream in streams {
+                                self.demo_unassign(stream);
                             }
+                            self.demo_routes.clear();
                             self.mixer.active = false;
                             self.mixer.sinks = [None; 5];
                         }
                         stream::MixAction::Assign { stream, channel } => {
-                            if let Some(item) =
+                            if channel.is_none() {
+                                self.demo_unassign(*stream);
+                            } else if let Some(item) =
                                 self.audio.playback.iter_mut().find(|i| i.index == *stream)
                             {
-                                item.target = channel
-                                    .and_then(|c| self.mixer.sinks[c])
-                                    .or_else(|| self.audio.outputs.first().map(|i| i.index));
+                                if let Some(target) = item.target
+                                    && !self.mixer.sinks.contains(&Some(target))
+                                {
+                                    self.demo_routes.insert(*stream, target);
+                                }
+                                item.target = channel.and_then(|c| self.mixer.sinks[c]);
                             }
                         }
                         _ => {}
@@ -144,6 +152,25 @@ impl State {
             .items_mut(kind)
             .iter_mut()
             .find(|d| d.index == id)
+    }
+
+    fn demo_unassign(&mut self, stream: u32) {
+        let previous = self.demo_routes.remove(&stream);
+        if let Some(item) = self.audio.playback.iter_mut().find(|i| i.index == stream)
+            && item.target.is_some()
+            && self.mixer.sinks.contains(&item.target)
+        {
+            item.target = previous
+                .filter(|target| self.audio.outputs.iter().any(|o| o.index == *target))
+                .or_else(|| {
+                    self.audio
+                        .outputs
+                        .iter()
+                        .find(|o| o.name == self.audio.default_output)
+                        .or(self.audio.outputs.first())
+                        .map(|o| o.index)
+                });
+        }
     }
 
     fn mute(&mut self, kind: Kind, id: u32) {
@@ -576,6 +603,34 @@ mod tests {
             .unwrap();
         poll(&mut rt.state, 0.0, &mut tx);
         assert_eq!(rt.state.audio.outputs[0].volume, 21);
+    }
+
+    #[test]
+    fn demo_restores_each_apps_output_after_unassignment_and_stop() {
+        let mut rt = runtime_at((940.0, 1400.0));
+        click(&mut rt, "tab-Stream");
+        click(&mut rt, "mix-toggle");
+        for stop in [false, true] {
+            rt.state.action(Action::Mix(stream::MixAction::Assign {
+                stream: 11,
+                channel: Some(0),
+            }));
+            rt.state.action(Action::Mix(stream::MixAction::Assign {
+                stream: 11,
+                channel: Some(1),
+            }));
+            assert_eq!(rt.state.audio.playback[1].target, Some(101));
+            rt.state.action(Action::Mix(if stop {
+                stream::MixAction::Stop
+            } else {
+                stream::MixAction::Assign {
+                    stream: 11,
+                    channel: None,
+                }
+            }));
+            assert_eq!(rt.state.audio.playback[1].target, Some(2));
+            assert!(rt.state.demo_routes.is_empty());
+        }
     }
 
     #[test]

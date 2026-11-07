@@ -138,6 +138,14 @@ impl Client {
     pub fn running(&mut self) -> bool {
         self.child.try_wait().ok().flatten().is_none()
     }
+    pub fn inspect(&mut self) -> Result<(), String> {
+        let result = self.request(&MixAction::Inspect);
+        if result.is_err() && !self.running() {
+            self.state.active = false;
+            self.state.sinks = [None; 5];
+        }
+        result
+    }
     pub fn spawn() -> Result<Self, String> {
         let mut command = Command::new(std::env::current_exe().map_err(|e| e.to_string())?);
         command
@@ -717,6 +725,66 @@ pub fn public_item(item: &Item) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn inspect_clears_active_mix_when_helper_exited_before_the_write() {
+        let mut child = Command::new("sh")
+            .args(["-c", "exit 0"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut client = Client {
+            input: child.stdin.take(),
+            output: BufReader::new(child.stdout.take().unwrap()),
+            child,
+            state: MixState {
+                active: true,
+                sinks: [Some(100); 5],
+                ..MixState::default()
+            },
+        };
+        client.child.wait().unwrap();
+        assert!(client.inspect().is_err());
+        assert!(!client.state.active);
+        assert_eq!(client.state.sinks, [None; 5]);
+    }
+
+    #[test]
+    fn inspect_preserves_active_mix_when_helper_reports_a_recoverable_error() {
+        let state = MixState {
+            active: true,
+            sinks: [Some(100); 5],
+            ..MixState::default()
+        };
+        let reply = serde_json::to_string(&Reply {
+            state: state.clone(),
+            error: Some("Temporary audio server failure".into()),
+        })
+        .unwrap();
+        let mut child = Command::new("sh")
+            .args([
+                "-c",
+                "read -r request; printf '%s\\n' \"$1\"; read -r request",
+                "test-helper",
+                &reply,
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut client = Client {
+            input: child.stdin.take(),
+            output: BufReader::new(child.stdout.take().unwrap()),
+            child,
+            state: state.clone(),
+        };
+        assert_eq!(
+            client.inspect().unwrap_err(),
+            "Temporary audio server failure"
+        );
+        assert_eq!(client.state, state);
+    }
+
     #[test]
     fn independent_levels_preserve_the_other_mix_and_microphone_starts_unmonitored() {
         let mut state = MixState::default();
